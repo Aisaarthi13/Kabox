@@ -2,7 +2,7 @@
 
 Kabox is an original wizard-academy-inspired productivity app for Android. It uses a dark, quiet, antique-gold visual language; it does not use Harry Potter characters, Hogwarts branding, or franchise artwork.
 
-## Current build: 0.1.0
+## Current build: 0.1.1 (CI workflow fix)
 
 ### Working in this build
 - Focus timer with 25, 45, and 60 minute presets.
@@ -73,3 +73,10 @@ scripts/                       One-command GitHub publishing helpers
 
 ## Important
 This is a functional first milestone, not a finished Regain-equivalent product. App blocking, website filtering, multiplayer, and production release require separate implementation and testing. Do not publish claims for a feature until it has been built and verified on real devices.
+
+
+## Updating the existing GitHub repository from Termux
+
+After downloading the updated source ZIP and extracting it, run `bash scripts/update-existing-github.sh` from the `Kabox` project folder. The script uses your existing `gh auth login` session, clones your existing `Kabox` repository, copies the project (including hidden workflow files), commits the changes, and pushes to `main`. It does not print or ask for your GitHub token.
+
+The GitHub Actions workflow uses `android-actions/setup-android@v4.0.2` and explicitly requests only `platform-tools`; it does not request the retired standalone SDK `tools` package.
