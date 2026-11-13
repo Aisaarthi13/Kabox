@@ -7,7 +7,7 @@ WORK_DIR="$(mktemp -d)"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
-command -v gh >/dev/null 2>&1 || { echo "GitHub CLI (gh) is missing. Run: pkg install gh git unzip"; exit 1; }
+command -v gh >/dev/null 2>&1 || { echo "GitHub CLI is missing. Run: pkg install gh git unzip"; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "Git is missing. Run: pkg install git"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "Sign in first with: gh auth login"; exit 1; }
 gh auth setup-git >/dev/null
@@ -20,7 +20,7 @@ if [ -z "$BRANCH" ]; then
   git -C "$WORK_DIR/repo" checkout -B "$BRANCH"
 fi
 
-echo "Replacing old source files with the clean Kabox v0.2.0 project ..."
+echo "Replacing repository source with Kabox 0.3.0 ..."
 find "$WORK_DIR/repo" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 cp -a "$SOURCE_DIR"/. "$WORK_DIR/repo"/
 
@@ -32,8 +32,8 @@ if git -C "$WORK_DIR/repo" diff --cached --quiet; then
   echo "Repository already contains this exact source; nothing to push."
   exit 0
 fi
-git -C "$WORK_DIR/repo" commit -m "Rebuild Kabox with stable Android API 36 configuration"
+git -C "$WORK_DIR/repo" commit -m "Build Kabox 0.3.0 with polished green UI and app blocker"
 git -C "$WORK_DIR/repo" push origin "HEAD:${BRANCH}"
 echo
-echo "Kabox source uploaded successfully: https://github.com/${REPO}"
-echo "Open the Actions tab to watch the Android APK build."
+echo "Kabox 0.3.0 uploaded: https://github.com/${REPO}"
+echo "Open Actions to watch the new APK build."

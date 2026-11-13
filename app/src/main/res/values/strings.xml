@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Kabox</string>
+    <string name="accessibility_service_description">Kabox can detect when an app you selected comes to the foreground and show a focus interruption screen. It does not read screen content or send accessibility data anywhere.</string>
 </resources>

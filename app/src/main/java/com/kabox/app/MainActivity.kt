@@ -1,23 +1,33 @@
 package com.kabox.app
 
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.AppOpsManager
+import android.app.TimePickerDialog
 import android.app.usage.UsageStatsManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
-import android.os.CountDownTimer
-import android.os.Process
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityManager
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import java.text.SimpleDateFormat
@@ -27,281 +37,178 @@ import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 
+/**
+ * Kabox 0.3.0 — local-first focus and screen-time companion.
+ * All focus records and blocker preferences are stored on-device.
+ */
 class MainActivity : Activity() {
-    private val bg = Color.rgb(9, 14, 25)
-    private val panel = Color.rgb(19, 27, 43)
-    private val panel2 = Color.rgb(24, 34, 52)
-    private val gold = Color.rgb(217, 184, 120)
-    private val ivory = Color.rgb(242, 237, 225)
-    private val muted = Color.rgb(164, 171, 184)
-    private val green = Color.rgb(134, 181, 147)
-    private val prefs by lazy { getSharedPreferences("kabox_local", Context.MODE_PRIVATE) }
+    private val page = Color.rgb(245, 248, 245)
+    private val surface = Color.WHITE
+    private val green = Color.rgb(18, 122, 82)
+    private val greenDark = Color.rgb(11, 77, 54)
+    private val greenSoft = Color.rgb(226, 245, 233)
+    private val lime = Color.rgb(184, 241, 202)
+    private val ink = Color.rgb(25, 39, 31)
+    private val muted = Color.rgb(112, 128, 119)
+    private val border = Color.rgb(226, 235, 228)
+    private val orange = Color.rgb(226, 145, 82)
 
-    private lateinit var root: LinearLayout
+    private val prefs by lazy { getSharedPreferences("kabox_local", Context.MODE_PRIVATE) }
+    private lateinit var shell: LinearLayout
     private var currentTab = "home"
+
+    // Countdown and Pomodoro state.
+    private var mode = "timer" // timer, pomodoro, stopwatch
     private var selectedMinutes = 25
     private var remainingMillis = 25L * 60_000L
+    private var intervalDurationMillis = 25L * 60_000L
     private var finishAtMillis = 0L
     private var timerRunning = false
-    private var ticker: CountDownTimer? = null
-    private var timerLabel: TextView? = null
-    private var timerStatus: TextView? = null
-    private var timerProgress: ProgressBar? = null
-    private var built = false
+    private var isBreak = false
+    private var pomodoroCycles = 0
+    private var stopwatchAccumulated = 0L
+    private var stopwatchStartedAt = 0L
+    private var tickerStarted = false
+
+    private var timerValue: TextView? = null
+    private var timerCaption: TextView? = null
+    private var timerRing: RingProgressView? = null
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable {
+        override fun run() {
+            updateTimerWidgets()
+            if (timerRunning || (mode == "stopwatch" && stopwatchStartedAt > 0L)) {
+                handler.postDelayed(this, 250L)
+            } else {
+                tickerStarted = false
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = bg
-        window.navigationBarColor = bg
-        window.decorView.systemUiVisibility = 0
+        window.statusBarColor = page
+        window.navigationBarColor = surface
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         restoreTimerState()
         render()
-        built = true
     }
 
     override fun onResume() {
         super.onResume()
-        if (built) render()
+        reconcileTimerAfterResume()
+        ensureTicker()
+        if (::shell.isInitialized) render()
     }
 
     override fun onPause() {
         saveTimerState()
+        handler.removeCallbacks(tick)
+        tickerStarted = false
         super.onPause()
     }
 
     override fun onDestroy() {
-        ticker?.cancel()
-        ticker = null
+        handler.removeCallbacks(tick)
+        tickerStarted = false
         super.onDestroy()
     }
 
+    // ---------------------------- App shell ----------------------------
+
     private fun render() {
-        root = LinearLayout(this).apply {
+        timerValue = null
+        timerCaption = null
+        timerRing = null
+
+        shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(bg)
-            setPadding(dp(20), dp(12), dp(20), dp(8))
+            setBackgroundColor(page)
         }
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, dp(12))
-        }
-        val mark = TextView(this).apply {
-            text = "✦"
-            textSize = 25f
-            gravity = Gravity.CENTER
-            setTextColor(bg)
-            background = rounded(gold, 16)
-        }
-        header.addView(mark, LinearLayout.LayoutParams(dp(46), dp(46)))
-        val brand = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, 0, 0)
-        }
-        brand.addView(label("KABOX", 16f, gold, true))
-        brand.addView(label("THE ACADEMY OF FOCUS", 9f, muted, false))
-        header.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
-        header.addView(label("✧  YOUR SPACE", 10f, muted, true))
-        root.addView(header)
+        shell.addView(buildHeader(), LinearLayout.LayoutParams(-1, dp(66)))
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
+            clipToPadding = false
+            setPadding(0, 0, 0, dp(12))
         }
-        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(22))
+        }
         when (currentTab) {
             "focus" -> buildFocus(content)
-            "insights" -> buildInsights(content)
+            "block" -> buildBlock(content)
+            "stats" -> buildStats(content)
+            "profile" -> buildProfile(content)
             else -> buildHome(content)
         }
         scroll.addView(content)
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(buildNavigation())
-        setContentView(root)
-        updateTimerViews()
+        shell.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        shell.addView(buildBottomNav(), LinearLayout.LayoutParams(-1, dp(68)))
+        setContentView(shell)
+        shell.alpha = 0f
+        shell.animate().alpha(1f).setDuration(180L).start()
+        updateTimerWidgets()
+        ensureTicker()
     }
 
-    private fun buildHome(parent: LinearLayout) {
-        parent.addView(label("MAKE ROOM FOR\nYOUR NEXT CHAPTER.", 29f, ivory, true).apply {
-            typeface = Typeface.create("serif", Typeface.BOLD)
-            setPadding(0, dp(12), 0, dp(8))
-        })
-        parent.addView(label("Small, focused sessions. A stronger mind, one day at a time.", 13f, muted, false))
-        spacer(parent, 18)
-
-        val stats = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        stats.addView(statCard("${todayFocusMinutes()}", "FOCUS MINUTES", "today"), LinearLayout.LayoutParams(0, -2, 1f))
-        stats.addView(spaceWidth(10))
-        stats.addView(statCard("${todaySessions()}", "SESSIONS", "completed"), LinearLayout.LayoutParams(0, -2, 1f))
-        stats.addView(spaceWidth(10))
-        stats.addView(statCard("${housePoints()}", "HOUSE POINTS", "earned"), LinearLayout.LayoutParams(0, -2, 1f))
-        parent.addView(stats)
-        spacer(parent, 16)
-
-        val goalCard = card()
-        goalCard.addView(label("TODAY'S INTENTION", 10f, gold, true))
-        spacer(goalCard, 8)
-        goalCard.addView(label("Give your attention somewhere meaningful.", 18f, ivory, true).apply {
-            typeface = Typeface.create("serif", Typeface.BOLD)
-        })
-        spacer(goalCard, 6)
-        goalCard.addView(label("Daily focus goal · 2 hours", 12f, muted, false))
-        spacer(goalCard, 12)
-        val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 1000
-            progress = min(1000, todayFocusMinutes() * 1000 / 120)
-            progressTintList = android.content.res.ColorStateList.valueOf(gold)
-            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(48, 56, 70))
+    private fun buildHeader(): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(7), dp(18), dp(5))
+            setBackgroundColor(page)
         }
-        goalCard.addView(progress, LinearLayout.LayoutParams(-1, dp(7)))
-        spacer(goalCard, 8)
-        goalCard.addView(label("${todayFocusMinutes()} / 120 minutes completed", 11f, muted, false))
-        spacer(goalCard, 14)
-        goalCard.addView(actionButton("BEGIN A FOCUS SESSION  →", true) { currentTab = "focus"; render() })
-        parent.addView(goalCard)
-        spacer(parent, 16)
-
-        val quest = card()
-        quest.addView(label("DAILY QUEST", 10f, gold, true))
-        spacer(quest, 8)
-        val done = todaySessions() > 0
-        quest.addView(label(if (done) "✓  First focus session complete" else "◌  Complete your first focus session", 15f, ivory, true))
-        spacer(quest, 4)
-        quest.addView(label(if (done) "Your first focus session is on the board." else "One completed session earns 25 house points.", 12f, muted, false))
-        parent.addView(quest)
-        spacer(parent, 16)
-        parent.addView(label("THE ACADEMY WING", 10f, gold, true))
-        spacer(parent, 8)
-        parent.addView(featureRow("⌛", "Focus chamber", "Timer and personal focus sessions", "AVAILABLE"))
-        spacer(parent, 8)
-        parent.addView(featureRow("◈", "Usage observatory", "See today's device usage", "AVAILABLE"))
-        spacer(parent, 8)
-        parent.addView(featureRow("✧", "Distraction wards", "App and website blocking", "IN DEVELOPMENT"))
-        spacer(parent, 8)
-        parent.addView(featureRow("♜", "Study commons", "Shared study rooms and House Cup", "IN DEVELOPMENT"))
-        spacer(parent, 12)
-        parent.addView(label("Kabox keeps your focus records on this device. No account required.", 11f, muted, false))
-        spacer(parent, 18)
-    }
-
-    private fun buildFocus(parent: LinearLayout) {
-        parent.addView(label("THE FOCUS CHAMBER", 11f, gold, true).apply { setPadding(0, dp(12), 0, dp(4)) })
-        parent.addView(label("One thing at a time.", 28f, ivory, true).apply {
-            typeface = Typeface.create("serif", Typeface.BOLD)
-        })
-        parent.addView(label("Choose a session length and settle into your work.", 13f, muted, false))
-        spacer(parent, 18)
-
-        val timerCard = card().apply { gravity = Gravity.CENTER_HORIZONTAL }
-        timerCard.addView(label("✧  YOUR HOURGLASS  ✧", 10f, gold, true))
-        spacer(timerCard, 20)
-        timerLabel = label(formatClock(remainingMillis), 56f, ivory, true).apply {
-            typeface = Typeface.create("serif", Typeface.NORMAL)
+        val logo = TextView(this).apply {
+            text = "K"
+            textSize = 22f
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
             gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = rounded(green, 15)
         }
-        timerCard.addView(timerLabel)
-        spacer(timerCard, 8)
-        timerStatus = label(if (timerRunning) "YOUR SESSION IS IN PROGRESS" else "READY WHEN YOU ARE", 10f, muted, true)
-        timerCard.addView(timerStatus)
-        spacer(timerCard, 22)
-        timerProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 1000
-            progressTintList = android.content.res.ColorStateList.valueOf(gold)
-            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(48, 56, 70))
+        bar.addView(logo, LinearLayout.LayoutParams(dp(42), dp(42)))
+        val brand = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), 0, 0, 0)
         }
-        timerCard.addView(timerProgress, LinearLayout.LayoutParams(-1, dp(7)))
-        spacer(timerCard, 18)
+        brand.addView(text("Kabox", 19f, ink, true))
+        brand.addView(text("FOCUS, WITH INTENTION", 8.5f, muted, true))
+        bar.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
 
-        val modeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf(25, 50, 90).forEachIndexed { index, minutes ->
-            val mode = actionButton("${minutes}m", minutes == selectedMinutes) {
-                if (!timerRunning) {
-                    selectedMinutes = minutes
-                    remainingMillis = minutes * 60_000L
-                    saveTimerState()
-                    render()
-                }
-            }
-            modeRow.addView(mode, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
-                if (index != 2) marginEnd = dp(8)
-            })
+        val profile = TextView(this).apply {
+            text = "•••"
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setTextColor(greenDark)
+            background = rounded(greenSoft, 22)
+            setOnClickListener { currentTab = "profile"; render() }
         }
-        timerCard.addView(modeRow)
-        spacer(timerCard, 12)
-        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val mainAction = actionButton(if (timerRunning) "PAUSE SESSION" else "START FOCUS", true) {
-            if (timerRunning) pauseTimer() else startTimer()
-        }
-        controls.addView(mainAction, LinearLayout.LayoutParams(0, dp(50), 1f))
-        controls.addView(spaceWidth(8))
-        controls.addView(actionButton("RESET", false) { resetTimer() }, LinearLayout.LayoutParams(dp(92), dp(50)))
-        timerCard.addView(controls)
-        parent.addView(timerCard)
-        spacer(parent, 14)
-
-        val note = card()
-        note.addView(label("A QUIET REMINDER", 10f, gold, true))
-        spacer(note, 6)
-        note.addView(label("Keep Kabox open or return when your session ends. Your timer is saved if the app is closed.", 12f, muted, false))
-        parent.addView(note)
-        spacer(parent, 20)
+        bar.addView(profile, LinearLayout.LayoutParams(dp(42), dp(42)))
+        return bar
     }
 
-    private fun buildInsights(parent: LinearLayout) {
-        parent.addView(label("YOUR OBSERVATORY", 11f, gold, true).apply { setPadding(0, dp(12), 0, dp(4)) })
-        parent.addView(label("Notice where your\ntime is going.", 29f, ivory, true).apply {
-            typeface = Typeface.create("serif", Typeface.BOLD)
-        })
-        parent.addView(label("Kabox reads Android's Usage Access report. Your usage data stays on this device.", 13f, muted, false))
-        spacer(parent, 18)
-        val usageCard = card()
-        usageCard.addView(label("SCREEN TIME · TODAY", 10f, gold, true))
-        spacer(usageCard, 10)
-        if (hasUsageAccess()) {
-            usageCard.addView(label(formatDuration(todayDeviceUsageMillis()), 34f, ivory, true).apply {
-                typeface = Typeface.create("serif", Typeface.BOLD)
-            })
-            spacer(usageCard, 4)
-            usageCard.addView(label("Total foreground app usage reported by Android.", 12f, muted, false))
-        } else {
-            usageCard.addView(label("Usage access is not enabled yet.", 17f, ivory, true))
-            spacer(usageCard, 6)
-            usageCard.addView(label("Allow Kabox in Android settings to read today's device usage total.", 12f, muted, false))
-            spacer(usageCard, 12)
-            usageCard.addView(actionButton("OPEN USAGE ACCESS SETTINGS", true) { openUsageSettings() })
-        }
-        parent.addView(usageCard)
-        spacer(parent, 14)
-
-        val focusCard = card()
-        focusCard.addView(label("YOUR FOCUS RECORD", 10f, gold, true))
-        spacer(focusCard, 10)
-        focusCard.addView(insightLine("Focus minutes today", "${todayFocusMinutes()} min"))
-        spacer(focusCard, 10)
-        focusCard.addView(insightLine("Sessions completed today", "${todaySessions()}"))
-        spacer(focusCard, 10)
-        focusCard.addView(insightLine("House points earned", "${housePoints()}"))
-        parent.addView(focusCard)
-        spacer(parent, 14)
-
-        val privacy = card()
-        privacy.addView(label("PRIVACY BY DESIGN", 10f, gold, true))
-        spacer(privacy, 6)
-        privacy.addView(label("Focus totals and points are stored locally with Android SharedPreferences. Kabox does not send this data to a server in this version.", 12f, muted, false))
-        parent.addView(privacy)
-        spacer(parent, 20)
-    }
-
-    private fun buildNavigation(): LinearLayout {
+    private fun buildBottomNav(): View {
         val nav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, dp(2))
-            background = rounded(panel, 18)
+            setPadding(dp(8), dp(6), dp(8), dp(7))
+            setBackgroundColor(surface)
+            background = GradientDrawable().apply {
+                setColor(surface)
+                cornerRadii = floatArrayOf(dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), dp(18).toFloat(), 0f, 0f, 0f, 0f)
+                setStroke(dp(1), border)
+            }
         }
-        addNavItem(nav, "✦", "HOME", "home")
-        addNavItem(nav, "⌛", "FOCUS", "focus")
-        addNavItem(nav, "◈", "INSIGHTS", "insights")
+        addNavItem(nav, "⌂", "Home", "home")
+        addNavItem(nav, "◷", "Focus", "focus")
+        addNavItem(nav, "▣", "Block", "block")
+        addNavItem(nav, "▥", "Stats", "stats")
         return nav
     }
 
@@ -310,222 +217,878 @@ class MainActivity : Activity() {
         val item = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, dp(6))
-            setOnClickListener { currentTab = tab; render() }
+            setPadding(0, dp(5), 0, dp(4))
             isClickable = true
             isFocusable = true
+            setOnClickListener { currentTab = tab; render() }
         }
-        item.addView(label(icon, 18f, if (active) gold else muted, true))
-        item.addView(label(title, 9f, if (active) gold else muted, true))
-        nav.addView(item, LinearLayout.LayoutParams(0, -2, 1f))
+        val iconView = TextView(this).apply {
+            text = icon
+            textSize = 20f
+            gravity = Gravity.CENTER
+            setTextColor(if (active) green else muted)
+        }
+        item.addView(iconView)
+        item.addView(text(title, 10f, if (active) green else muted, active))
+        nav.addView(item, LinearLayout.LayoutParams(0, -1, 1f))
     }
 
-    private fun statCard(value: String, title: String, subtitle: String): LinearLayout {
-        val box = card().apply { setPadding(dp(11), dp(14), dp(11), dp(14)) }
-        box.addView(label(value, 24f, ivory, true).apply { typeface = Typeface.create("serif", Typeface.BOLD) })
-        spacer(box, 4)
-        box.addView(label(title, 8f, gold, true))
-        box.addView(label(subtitle, 9f, muted, false))
+    // ---------------------------- Home ----------------------------
+
+    private fun buildHome(parent: LinearLayout) {
+        val greeting = when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {
+            in 5..11 -> "Good morning"
+            in 12..16 -> "Good afternoon"
+            else -> "Good evening"
+        }
+        parent.addView(text(greeting, 13f, muted, true))
+        parent.addView(text("Make today\ncount.", 34f, ink, true).apply {
+            setLineSpacing(dp(1).toFloat(), 1f)
+            setPadding(0, dp(2), 0, dp(3))
+        })
+        parent.addView(text("Build focus one session at a time.", 13f, muted, false))
+        gap(parent, 18)
+
+        val hero = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(19), dp(20), dp(18))
+            background = gradientCard(greenDark, green, 24)
+            elevation = dp(2).toFloat()
+        }
+        val heroTop = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val heroTitleBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        heroTitleBox.addView(text("YOUR NEXT SESSION", 9f, Color.rgb(196, 235, 211), true))
+        heroTitleBox.addView(text("Ready when you are.", 19f, Color.WHITE, true).apply { setPadding(0, dp(5), 0, 0) })
+        heroTop.addView(heroTitleBox, LinearLayout.LayoutParams(0, -2, 1f))
+        val badge = TextView(this).apply {
+            text = "●  ON TRACK"
+            textSize = 8.5f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            background = rounded(Color.argb(38, 255, 255, 255), 20)
+        }
+        heroTop.addView(badge)
+        hero.addView(heroTop)
+        gap(hero, 17)
+        hero.addView(text("A little progress, repeated daily, becomes a big change.", 12f, Color.rgb(221, 243, 229), false))
+        gap(hero, 17)
+        val heroAction = button("START FOCUS  →", true, greenDark) {
+            if (mode == "stopwatch" && stopwatchStartedAt == 0L) mode = "timer"
+            currentTab = "focus"
+            render()
+        }
+        heroAction.background = rounded(Color.WHITE, 13)
+        heroAction.setTextColor(greenDark)
+        hero.addView(heroAction, LinearLayout.LayoutParams(-1, dp(48)))
+        parent.addView(hero)
+        gap(parent, 16)
+
+        val stats = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        stats.addView(metricCard("${todayFocusMinutes()}", "FOCUS MIN", green), LinearLayout.LayoutParams(0, dp(92), 1f))
+        stats.addView(spaceW(9))
+        stats.addView(metricCard("${todaySessions()}", "SESSIONS", orange), LinearLayout.LayoutParams(0, dp(92), 1f))
+        stats.addView(spaceW(9))
+        stats.addView(metricCard("${currentStreak()}", "DAY STREAK", greenDark), LinearLayout.LayoutParams(0, dp(92), 1f))
+        parent.addView(stats)
+        gap(parent, 15)
+
+        val goal = card()
+        val goalHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        goalHead.addView(text("Daily focus goal", 15f, ink, true), LinearLayout.LayoutParams(0, -2, 1f))
+        goalHead.addView(text("${todayFocusMinutes()} / ${dailyGoalMinutes()} min", 11f, green, true))
+        goal.addView(goalHead)
+        gap(goal, 11)
+        val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000
+            progress = (todayFocusMinutes() * 1000 / max(1, dailyGoalMinutes())).coerceIn(0, 1000)
+            progressTintList = android.content.res.ColorStateList.valueOf(green)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(greenSoft)
+        }
+        goal.addView(pb, LinearLayout.LayoutParams(-1, dp(8)))
+        gap(goal, 8)
+        goal.addView(text(if (todayFocusMinutes() >= dailyGoalMinutes()) "Goal reached. Great work today." else "${max(0, dailyGoalMinutes() - todayFocusMinutes())} minutes to reach today's goal.", 11f, muted, false))
+        parent.addView(goal)
+        gap(parent, 15)
+
+        val weekCard = card()
+        sectionTitle(weekCard, "THIS WEEK", "Your focus rhythm")
+        gap(weekCard, 6)
+        weekCard.addView(WeeklyFocusChart(this, green, border, weeklyFocusValues()), LinearLayout.LayoutParams(-1, dp(120)))
+        parent.addView(weekCard)
+        gap(parent, 15)
+
+        val quickHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        quickHead.addView(text("Quick tools", 17f, ink, true), LinearLayout.LayoutParams(0, -2, 1f))
+        quickHead.addView(text("VIEW ALL", 9f, green, true).apply { setOnClickListener { currentTab = "block"; render() } })
+        parent.addView(quickHead)
+        gap(parent, 9)
+        val quick = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        quick.addView(quickCard("App blocker", "Choose distractions", "▣") { currentTab = "block"; render() }, LinearLayout.LayoutParams(0, dp(104), 1f))
+        quick.addView(spaceW(10))
+        quick.addView(quickCard("Screen time", "See your usage", "◷") { currentTab = "stats"; render() }, LinearLayout.LayoutParams(0, dp(104), 1f))
+        parent.addView(quick)
+        gap(parent, 14)
+        parent.addView(text("Your focus data stays on this device.", 10f, muted, false).apply { gravity = Gravity.CENTER })
+    }
+
+    private fun metricCard(value: String, title: String, accent: Int): View {
+        val box = card().apply { setPadding(dp(12), dp(13), dp(10), dp(10)) }
+        box.addView(text(value, 23f, ink, true))
+        gap(box, 5)
+        box.addView(text(title, 8.5f, accent, true))
         return box
     }
 
-    private fun featureRow(icon: String, title: String, description: String, status: String): LinearLayout {
-        val row = card().apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(13), dp(14), dp(13))
-        }
-        row.addView(label(icon, 23f, gold, true), LinearLayout.LayoutParams(dp(38), -2))
-        val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        copy.addView(label(title, 14f, ivory, true))
-        copy.addView(label(description, 10f, muted, false))
-        row.addView(copy, LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(label(status, 8f, if (status == "AVAILABLE") green else muted, true))
-        return row
-    }
-
-    private fun insightLine(title: String, value: String): LinearLayout {
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        row.addView(label(title, 12f, muted, false), LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(label(value, 13f, ivory, true))
-        return row
-    }
-
-    private fun card(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(17), dp(17), dp(17), dp(17))
-        background = rounded(panel, 20, Color.rgb(43, 52, 68))
-    }
-
-    private fun actionButton(text: String, primary: Boolean, click: () -> Unit): TextView {
-        return TextView(this).apply {
-            this.text = text
-            textSize = 11f
-            gravity = Gravity.CENTER
-            setTextColor(if (primary) bg else gold)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-            background = rounded(if (primary) gold else panel2, 14, if (primary) gold else Color.rgb(82, 74, 60))
+    private fun quickCard(title: String, subtitle: String, icon: String, click: () -> Unit): View {
+        val box = card().apply {
+            setPadding(dp(13), dp(12), dp(10), dp(10))
             isClickable = true
             isFocusable = true
             setOnClickListener { click() }
         }
-    }
-
-    private fun label(text: String, size: Float, color: Int, bold: Boolean): TextView {
-        return TextView(this).apply {
-            this.text = text
-            textSize = size
-            setTextColor(color)
-            typeface = if (bold) Typeface.create("sans-serif-medium", Typeface.BOLD) else Typeface.create("sans-serif", Typeface.NORMAL)
-            includeFontPadding = true
+        val badge = TextView(this).apply {
+            text = icon
+            gravity = Gravity.CENTER
+            textSize = 17f
+            setTextColor(green)
+            background = rounded(greenSoft, 11)
         }
+        box.addView(badge, LinearLayout.LayoutParams(dp(33), dp(33)))
+        gap(box, 6)
+        box.addView(text(title, 13f, ink, true))
+        box.addView(text(subtitle, 10f, muted, false))
+        return box
     }
 
-    private fun rounded(color: Int, radiusDp: Int, stroke: Int? = null): GradientDrawable = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        setColor(color)
-        cornerRadius = dp(radiusDp).toFloat()
-        if (stroke != null) setStroke(dp(1), stroke)
-    }
+    // ---------------------------- Focus modes ----------------------------
 
-    private fun spacer(parent: LinearLayout, heightDp: Int) {
-        parent.addView(View(this), LinearLayout.LayoutParams(1, dp(heightDp)))
-    }
+    private fun buildFocus(parent: LinearLayout) {
+        parent.addView(text("FOCUS SESSION", 10f, green, true))
+        parent.addView(text("Find your flow.", 29f, ink, true).apply { setPadding(0, dp(2), 0, dp(2)) })
+        parent.addView(text("Choose how you want to work today.", 12f, muted, false))
+        gap(parent, 16)
 
-    private fun spaceWidth(widthDp: Int): View = View(this).apply {
-        layoutParams = LinearLayout.LayoutParams(dp(widthDp), 1)
-    }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun startTimer() {
-        if (timerRunning) return
-        if (remainingMillis <= 0L) remainingMillis = selectedMinutes * 60_000L
-        timerRunning = true
-        finishAtMillis = System.currentTimeMillis() + remainingMillis
-        saveTimerState()
-        startTicker()
-        updateTimerViews()
-    }
-
-    private fun pauseTimer() {
-        if (!timerRunning) return
-        val end = finishAtMillis
-        val left = max(0L, end - System.currentTimeMillis())
-        if (left == 0L) {
-            completeFocusSession()
-            return
+        val modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = rounded(Color.rgb(233, 240, 235), 15)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
         }
-        remainingMillis = left
+        addModeChip(modeRow, "Timer", "timer")
+        addModeChip(modeRow, "Pomodoro", "pomodoro")
+        addModeChip(modeRow, "Stopwatch", "stopwatch")
+        parent.addView(modeRow, LinearLayout.LayoutParams(-1, dp(45)))
+        gap(parent, 14)
+
+        val timerCard = card().apply { gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(18), dp(18), dp(18), dp(18)) }
+        val status = when {
+            timerRunning && isBreak -> "BREAK IN PROGRESS"
+            timerRunning -> "FOCUS IN PROGRESS"
+            mode == "pomodoro" && isBreak -> "READY FOR YOUR BREAK"
+            else -> "READY WHEN YOU ARE"
+        }
+        timerCaption = text(status, 9f, green, true)
+        timerCard.addView(timerCaption)
+        gap(timerCard, 14)
+
+        val ring = RingProgressView(this, green, greenSoft).apply {
+            setProgress(timerProgressValue())
+        }
+        timerRing = ring
+        val ringBox = FrameLayoutCompat(this)
+        ringBox.addView(ring, FrameLayoutCompat.LayoutParams(dp(218), dp(218), Gravity.CENTER))
+        val inner = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
+        timerValue = text(currentTimerText(), 43f, ink, true).apply {
+            gravity = Gravity.CENTER
+            letterSpacing = -0.03f
+        }
+        inner.addView(timerValue)
+        inner.addView(text(if (mode == "stopwatch") "ELAPSED" else if (isBreak) "BREAK TIME" else "REMAINING", 9f, muted, true))
+        ringBox.addView(inner, FrameLayoutCompat.LayoutParams(dp(170), dp(170), Gravity.CENTER))
+        timerCard.addView(ringBox, LinearLayout.LayoutParams(-1, dp(218)))
+        gap(timerCard, 9)
+        val sub = when (mode) {
+            "pomodoro" -> if (isBreak) "Cycle ${max(1, pomodoroCycles)} · take a short reset" else "Cycle ${pomodoroCycles + 1} · focus for ${selectedMinutes} minutes"
+            "stopwatch" -> "Let the timer measure your deep-work session"
+            else -> "A focused ${selectedMinutes}-minute session"
+        }
+        timerCard.addView(text(sub, 11f, muted, false))
+        gap(timerCard, 16)
+
+        if (mode != "stopwatch") {
+            val presets = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+            listOf(25, 45, 60, 90).forEachIndexed { i, mins ->
+                val chip = smallChip("${mins}m", selectedMinutes == mins) {
+                    if (!timerRunning) {
+                        selectedMinutes = mins
+                        remainingMillis = (if (mode == "pomodoro" && isBreak) 5 else mins) * 60_000L
+                        intervalDurationMillis = remainingMillis
+                        saveTimerState()
+                        render()
+                    }
+                }
+                presets.addView(chip, LinearLayout.LayoutParams(0, dp(40), 1f).apply { if (i != 3) marginEnd = dp(7) })
+            }
+            timerCard.addView(presets)
+            gap(timerCard, 13)
+        }
+
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val startLabel = when {
+            timerRunning -> "PAUSE"
+            mode == "stopwatch" && stopwatchStartedAt > 0L -> "PAUSE"
+            mode == "stopwatch" && stopwatchAccumulated > 0L -> "RESUME"
+            mode == "pomodoro" && isBreak -> "START BREAK"
+            else -> "START FOCUS"
+        }
+        actions.addView(button(startLabel, true) {
+            if (timerRunning || (mode == "stopwatch" && stopwatchStartedAt > 0L)) pauseFocus() else startFocus()
+        }, LinearLayout.LayoutParams(0, dp(50), 1f))
+        actions.addView(spaceW(9))
+        actions.addView(button(if (mode == "stopwatch") "SAVE" else "RESET", false) { if (mode == "stopwatch") finishStopwatch() else resetFocus() }, LinearLayout.LayoutParams(dp(94), dp(50)))
+        timerCard.addView(actions)
+        parent.addView(timerCard)
+        gap(parent, 13)
+
+        val blockCard = card()
+        val titleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val titleBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        titleBox.addView(text("Block distractions", 14f, ink, true))
+        titleBox.addView(text("Pause selected apps while this session runs.", 10f, muted, false))
+        titleRow.addView(titleBox, LinearLayout.LayoutParams(0, -2, 1f))
+        val focusSwitch = Switch(this).apply {
+            isChecked = prefs.getBoolean("block_during_focus", true)
+            setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("block_during_focus", checked).apply() }
+        }
+        titleRow.addView(focusSwitch)
+        blockCard.addView(titleRow)
+        parent.addView(blockCard)
+        gap(parent, 14)
+        parent.addView(text("Your timer is saved automatically when you leave Kabox.", 10f, muted, false).apply { gravity = Gravity.CENTER })
+    }
+
+    private fun addModeChip(row: LinearLayout, label: String, value: String) {
+        val selected = mode == value
+        val chip = TextView(this).apply {
+            text = label
+            textSize = 11f
+            gravity = Gravity.CENTER
+            typeface = Typeface.create("sans-serif-medium", if (selected) Typeface.BOLD else Typeface.NORMAL)
+            setTextColor(if (selected) greenDark else muted)
+            background = if (selected) rounded(Color.WHITE, 12) else rounded(Color.TRANSPARENT, 12)
+            setOnClickListener {
+                if (!timerRunning && !(mode == "stopwatch" && stopwatchStartedAt > 0L)) {
+                    mode = value
+                    isBreak = false
+                    if (mode == "stopwatch") {
+                        remainingMillis = 0L
+                    } else {
+                        remainingMillis = selectedMinutes * 60_000L
+                        intervalDurationMillis = remainingMillis
+                    }
+                    saveTimerState()
+                    render()
+                }
+            }
+        }
+        row.addView(chip, LinearLayout.LayoutParams(0, -1, 1f))
+    }
+
+    private fun startFocus() {
+        if (mode == "stopwatch") {
+            stopwatchStartedAt = System.currentTimeMillis()
+            prefs.edit().putLong("stopwatch_started_at", stopwatchStartedAt).apply()
+            ensureTicker()
+            Toast.makeText(this, "Stopwatch started", Toast.LENGTH_SHORT).show()
+        } else {
+            if (remainingMillis <= 0L) { remainingMillis = selectedMinutes * 60_000L; intervalDurationMillis = remainingMillis }
+            timerRunning = true
+            finishAtMillis = System.currentTimeMillis() + remainingMillis
+            saveTimerState()
+            ensureTicker()
+            Toast.makeText(this, if (isBreak) "Break started" else "Focus started", Toast.LENGTH_SHORT).show()
+        }
+        render()
+    }
+
+    private fun pauseFocus() {
+        if (mode == "stopwatch") {
+            if (stopwatchStartedAt > 0L) {
+                stopwatchAccumulated += max(0L, System.currentTimeMillis() - stopwatchStartedAt)
+                stopwatchStartedAt = 0L
+                prefs.edit().putLong("stopwatch_accumulated", stopwatchAccumulated).putLong("stopwatch_started_at", 0L).apply()
+            }
+        } else if (timerRunning) {
+            remainingMillis = max(0L, finishAtMillis - System.currentTimeMillis())
+            timerRunning = false
+            finishAtMillis = 0L
+            saveTimerState()
+            if (remainingMillis == 0L) completeCountdown()
+        }
+        render()
+    }
+
+    private fun resetFocus() {
         timerRunning = false
         finishAtMillis = 0L
-        ticker?.cancel()
-        ticker = null
+        isBreak = false
+        if (mode == "stopwatch") {
+            stopwatchAccumulated = 0L
+            stopwatchStartedAt = 0L
+            prefs.edit().putLong("stopwatch_accumulated", 0L).putLong("stopwatch_started_at", 0L).apply()
+        } else {
+            remainingMillis = selectedMinutes * 60_000L
+            intervalDurationMillis = remainingMillis
+        }
         saveTimerState()
         render()
     }
 
-    private fun resetTimer() {
-        ticker?.cancel()
-        ticker = null
-        timerRunning = false
-        finishAtMillis = 0L
-        remainingMillis = selectedMinutes * 60_000L
-        saveTimerState()
-        render()
-    }
-
-    private fun startTicker() {
-        ticker?.cancel()
-        val duration = max(1_000L, finishAtMillis - System.currentTimeMillis())
-        ticker = object : CountDownTimer(duration, 250L) {
-            override fun onTick(millisUntilFinished: Long) {
-                remainingMillis = max(0L, finishAtMillis - System.currentTimeMillis())
-                updateTimerViews()
-            }
-
-            override fun onFinish() {
-                remainingMillis = 0L
-                completeFocusSession()
-            }
-        }.start()
-    }
-
-    private fun completeFocusSession() {
-        if (!timerRunning) return
-        ticker?.cancel()
-        ticker = null
+    private fun completeCountdown() {
         timerRunning = false
         finishAtMillis = 0L
         remainingMillis = 0L
-        val key = todayKey()
-        val newMinutes = todayFocusMinutes() + selectedMinutes
-        val newSessions = todaySessions() + 1
-        val newPoints = housePoints() + 25
-        prefs.edit()
-            .putBoolean("timer_running", false)
-            .putLong("timer_finish_at", 0L)
-            .putLong("timer_remaining", 0L)
-            .putInt("timer_selected_minutes", selectedMinutes)
-            .putInt("focus_minutes_$key", newMinutes)
-            .putInt("focus_sessions_$key", newSessions)
-            .putInt("house_points", newPoints)
-            .apply()
-        Toast.makeText(this, "Focus session complete · +25 house points", Toast.LENGTH_LONG).show()
-        if (built) render()
+        if (mode == "pomodoro") {
+            if (!isBreak) {
+                recordFocusSession(selectedMinutes)
+                pomodoroCycles += 1
+                isBreak = true
+                val breakMinutes = if (pomodoroCycles % 4 == 0) 15 else 5
+                remainingMillis = breakMinutes * 60_000L
+                intervalDurationMillis = remainingMillis
+                Toast.makeText(this, "Focus cycle complete. Take a ${breakMinutes}-minute break.", Toast.LENGTH_LONG).show()
+            } else {
+                isBreak = false
+                remainingMillis = selectedMinutes * 60_000L
+                intervalDurationMillis = remainingMillis
+                Toast.makeText(this, "Break complete. Ready for another focus cycle?", Toast.LENGTH_LONG).show()
+            }
+        } else {
+            recordFocusSession(selectedMinutes)
+            Toast.makeText(this, "Focus session complete. Well done!", Toast.LENGTH_LONG).show()
+        }
+        saveTimerState()
+        if (::shell.isInitialized) render()
+    }
+
+    private fun finishStopwatch() {
+        if (stopwatchStartedAt > 0L) stopwatchAccumulated += max(0L, System.currentTimeMillis() - stopwatchStartedAt)
+        stopwatchStartedAt = 0L
+        val minutes = (stopwatchAccumulated / 60_000L).toInt()
+        if (minutes > 0) recordFocusSession(minutes)
+        stopwatchAccumulated = 0L
+        prefs.edit().putLong("stopwatch_accumulated", 0L).putLong("stopwatch_started_at", 0L).apply()
+        Toast.makeText(this, if (minutes > 0) "${minutes} focus minutes saved" else "Session was shorter than one minute", Toast.LENGTH_LONG).show()
+        render()
+    }
+
+    private fun currentTimerText(): String {
+        return if (mode == "stopwatch") {
+            val elapsed = stopwatchAccumulated + if (stopwatchStartedAt > 0L) max(0L, System.currentTimeMillis() - stopwatchStartedAt) else 0L
+            formatClock(elapsed)
+        } else formatClock(remainingMillis)
+    }
+
+    private fun timerProgressValue(): Float {
+        if (mode == "stopwatch") return 0f
+        val total = max(1L, intervalDurationMillis).toFloat()
+        if (total <= 0f) return 0f
+        return ((total - remainingMillis.toFloat()).coerceAtLeast(0f) / total).coerceIn(0f, 1f)
+    }
+
+    private fun updateTimerWidgets() {
+        if (timerRunning && mode != "stopwatch") {
+            remainingMillis = max(0L, finishAtMillis - System.currentTimeMillis())
+            if (remainingMillis <= 0L) { completeCountdown(); return }
+        }
+        timerValue?.text = currentTimerText()
+        timerCaption?.text = when {
+            timerRunning && isBreak -> "BREAK IN PROGRESS"
+            timerRunning -> "FOCUS IN PROGRESS"
+            mode == "pomodoro" && isBreak -> "READY FOR YOUR BREAK"
+            mode == "stopwatch" && stopwatchStartedAt > 0L -> "STOPWATCH RUNNING"
+            else -> "READY WHEN YOU ARE"
+        }
+        timerRing?.setProgress(timerProgressValue())
+    }
+
+    private fun ensureTicker() {
+        if (!tickerStarted && (timerRunning || (mode == "stopwatch" && stopwatchStartedAt > 0L))) {
+            tickerStarted = true
+            handler.removeCallbacks(tick)
+            handler.post(tick)
+        }
     }
 
     private fun saveTimerState() {
         prefs.edit()
+            .putString("timer_mode", mode)
             .putInt("timer_selected_minutes", selectedMinutes)
             .putLong("timer_remaining", remainingMillis)
+            .putLong("timer_interval_duration", intervalDurationMillis)
             .putLong("timer_finish_at", if (timerRunning) finishAtMillis else 0L)
             .putBoolean("timer_running", timerRunning)
+            .putBoolean("timer_is_break", isBreak)
+            .putInt("pomodoro_cycles", pomodoroCycles)
             .apply()
     }
 
     private fun restoreTimerState() {
+        mode = prefs.getString("timer_mode", "timer") ?: "timer"
+        if (mode !in setOf("timer", "pomodoro", "stopwatch")) mode = "timer"
         selectedMinutes = prefs.getInt("timer_selected_minutes", 25).coerceIn(1, 180)
+        remainingMillis = prefs.getLong("timer_remaining", selectedMinutes * 60_000L).coerceAtLeast(0L)
+        intervalDurationMillis = prefs.getLong("timer_interval_duration", selectedMinutes * 60_000L).coerceAtLeast(1L)
+        finishAtMillis = prefs.getLong("timer_finish_at", 0L)
         timerRunning = prefs.getBoolean("timer_running", false)
+        isBreak = prefs.getBoolean("timer_is_break", false)
+        pomodoroCycles = prefs.getInt("pomodoro_cycles", 0)
+        stopwatchAccumulated = prefs.getLong("stopwatch_accumulated", 0L)
+        stopwatchStartedAt = prefs.getLong("stopwatch_started_at", 0L)
+    }
+
+    private fun reconcileTimerAfterResume() {
         if (timerRunning) {
-            finishAtMillis = prefs.getLong("timer_finish_at", 0L)
-            remainingMillis = max(0L, finishAtMillis - System.currentTimeMillis())
-            if (finishAtMillis <= System.currentTimeMillis()) {
-                completeExpiredSessionOnRestore()
-            } else {
-                startTicker()
-            }
-        } else {
-            finishAtMillis = 0L
-            remainingMillis = prefs.getLong("timer_remaining", selectedMinutes * 60_000L)
-                .coerceIn(0L, selectedMinutes * 60_000L)
+            val left = finishAtMillis - System.currentTimeMillis()
+            if (left <= 0L) {
+                remainingMillis = 0L
+                completeCountdown()
+            } else remainingMillis = left
+        }
+        if (mode == "stopwatch" && stopwatchStartedAt > 0L) {
+            // Wall-clock start time is retained so the stopwatch continues across process recreation.
         }
     }
 
-    private fun completeExpiredSessionOnRestore() {
-        timerRunning = true
-        ticker?.cancel()
-        timerRunning = false
-        remainingMillis = 0L
-        finishAtMillis = 0L
-        val key = todayKey()
+    // ---------------------------- App blocker ----------------------------
+
+    private fun buildBlock(parent: LinearLayout) {
+        parent.addView(text("DIGITAL WELLBEING", 10f, green, true))
+        parent.addView(text("Choose what gets\nyour attention.", 29f, ink, true).apply { setPadding(0, dp(3), 0, dp(4)) })
+        parent.addView(text("Select distracting apps. Kabox can pause them during focus or after a daily limit.", 12f, muted, false))
+        gap(parent, 15)
+
+        val statusCard = card()
+        val enabled = isAccessibilityEnabled()
+        val statusRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val statusText = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        statusText.addView(text("App blocker", 16f, ink, true))
+        statusText.addView(text(if (enabled) "Accessibility service connected" else "Needs one-time Android permission", 10f, if (enabled) green else orange, false))
+        statusRow.addView(statusText, LinearLayout.LayoutParams(0, -2, 1f))
+        val statusPill = TextView(this).apply {
+            text = if (enabled) "READY" else "SETUP"
+            textSize = 9f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(if (enabled) greenDark else orange)
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            background = rounded(if (enabled) greenSoft else Color.rgb(255, 243, 230), 20)
+        }
+        statusRow.addView(statusPill)
+        statusCard.addView(statusRow)
+        gap(statusCard, 12)
+        val master = Switch(this).apply {
+            text = "Block selected apps all the time"
+            textSize = 12f
+            setTextColor(ink)
+            isChecked = prefs.getBoolean("blocker_always_on", false)
+            setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean("blocker_always_on", checked).apply()
+                if (checked && !isAccessibilityEnabled()) showAccessibilityDisclosure()
+            }
+        }
+        statusCard.addView(master)
+        gap(statusCard, 6)
+        statusCard.addView(button(if (enabled) "OPEN ACCESSIBILITY SETTINGS" else "ENABLE APP BLOCKER", true) { showAccessibilityDisclosure() })
+        parent.addView(statusCard)
+        gap(parent, 12)
+
+        val disclosure = card().apply { setPadding(dp(14), dp(13), dp(14), dp(13)) }
+        disclosure.addView(text("YOUR PRIVACY", 9f, green, true))
+        gap(disclosure, 5)
+        disclosure.addView(text("Kabox uses Accessibility only to detect the foreground app you selected and show a block screen. It does not inspect screen text, passwords or messages, and does not send accessibility data to a server. You can turn the service off in Android Settings at any time. Daily app caps also need Usage Access.", 10.5f, muted, false))
+        parent.addView(disclosure)
+        gap(parent, 15)
+
+        val listHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        listHead.addView(text("Your app list", 17f, ink, true), LinearLayout.LayoutParams(0, -2, 1f))
+        val blockedCount = selectedBlockedApps().size
+        listHead.addView(text("$blockedCount selected", 10f, green, true))
+        parent.addView(listHead)
+        gap(parent, 5)
+        parent.addView(text("Selected apps are paused during focus when the blocker service is enabled.", 10f, muted, false))
+        gap(parent, 9)
+
+        val apps = installedApps()
+        if (apps.isEmpty()) {
+            parent.addView(card().apply { addView(text("No launchable apps found.", 12f, muted, false)) })
+        } else {
+            apps.forEach { app ->
+                parent.addView(appBlockRow(app))
+                gap(parent, 7)
+            }
+        }
+
+        val websiteCard = card()
+        websiteCard.addView(text("Website and Reels filters", 14f, ink, true))
+        gap(websiteCard, 5)
+        websiteCard.addView(text("Not enabled in this release. For now, selecting Instagram or YouTube above blocks the whole app during focus; selective Reels/Shorts and website filtering are planned for a later tested release.", 10.5f, muted, false))
+        parent.addView(websiteCard)
+        gap(parent, 16)
+    }
+
+    private data class AppRowData(val packageName: String, val label: String, val icon: android.graphics.drawable.Drawable, val isSystem: Boolean)
+
+    private fun installedApps(): List<AppRowData> {
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        return try {
+            packageManager.queryIntentActivities(intent, 0)
+                .mapNotNull { info ->
+                    val activityInfo = info.activityInfo ?: return@mapNotNull null
+                    val pkg = activityInfo.packageName
+                    if (pkg == packageName || pkg == "android") return@mapNotNull null
+                    try {
+                        val appInfo = packageManager.getApplicationInfo(pkg, 0)
+                        AppRowData(pkg, packageManager.getApplicationLabel(appInfo).toString(), packageManager.getApplicationIcon(appInfo), (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0)
+                    } catch (_: Exception) { null }
+                }
+                .distinctBy { it.packageName }
+                .sortedWith(compareBy<AppRowData> { it.isSystem }.thenBy { it.label.lowercase(Locale.getDefault()) })
+        } catch (_: Exception) { emptyList() }
+    }
+
+    private fun appBlockRow(app: AppRowData): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(10), dp(10))
+            background = rounded(surface, 15, border)
+        }
+        val icon = ImageView(this).apply { setImageDrawable(app.icon); scaleType = ImageView.ScaleType.FIT_CENTER }
+        row.addView(icon, LinearLayout.LayoutParams(dp(36), dp(36)))
+        val details = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), 0, 0, 0) }
+        details.addView(text(app.label, 12f, ink, true))
+        val limit = if (prefs.getBoolean("limit_enabled_${app.packageName}", false)) "Limit: ${prefs.getInt("limit_minutes_${app.packageName}", 60)} min/day" else "No daily limit"
+        details.addView(text(limit, 9f, muted, false))
+        row.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val selected = selectedBlockedApps().contains(app.packageName)
+        val sw = Switch(this).apply {
+            isChecked = selected
+            scaleX = 0.88f
+            scaleY = 0.88f
+            setOnCheckedChangeListener { _, checked ->
+                val set = selectedBlockedApps().toMutableSet()
+                if (checked) set.add(app.packageName) else set.remove(app.packageName)
+                prefs.edit().putStringSet("blocked_apps", set).apply()
+            }
+        }
+        row.addView(sw)
+        row.setOnClickListener { sw.isChecked = !sw.isChecked }
+        val limitButton = TextView(this).apply {
+            text = "⋮"
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setTextColor(muted)
+            setPadding(dp(5), 0, dp(2), 0)
+            setOnClickListener { showAppLimitDialog(app) }
+        }
+        row.addView(limitButton, LinearLayout.LayoutParams(dp(28), dp(40)))
+        return row
+    }
+
+    private fun showAppLimitDialog(app: AppRowData) {
+        val options = arrayOf("No daily limit", "30 minutes/day", "60 minutes/day", "90 minutes/day", "120 minutes/day", "180 minutes/day")
+        AlertDialog.Builder(this)
+            .setTitle("Daily limit · ${app.label}")
+            .setItems(options) { _, which ->
+                if (which == 0) {
+                    prefs.edit().putBoolean("limit_enabled_${app.packageName}", false).apply()
+                } else {
+                    val minutes = listOf(0, 30, 60, 90, 120, 180)[which]
+                    prefs.edit().putBoolean("limit_enabled_${app.packageName}", true)
+                        .putInt("limit_minutes_${app.packageName}", minutes).apply()
+                }
+                render()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showAccessibilityDisclosure() {
+        AlertDialog.Builder(this)
+            .setTitle("Allow Kabox to pause selected apps?")
+            .setMessage("Kabox uses Android Accessibility Service to detect when an app you selected comes to the foreground. When a focus session is active, or an always-on block/daily limit applies, Kabox sends you to a brief interruption screen. It does not read screen content or send accessibility data away from your device. You can disable the service at any time in Android Settings.")
+            .setPositiveButton("Continue to settings") { _, _ ->
+                try { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                catch (_: Exception) { Toast.makeText(this, "Open Android Settings → Accessibility → Downloaded apps → Kabox.", Toast.LENGTH_LONG).show() }
+            }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    private fun isAccessibilityEnabled(): Boolean {
+        val manager = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
+        val expected = ComponentName(this, com.kabox.app.blocking.AppBlockAccessibilityService::class.java).flattenToString()
+        return try {
+            manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+                .any { it.resolveInfo.serviceInfo.packageName == packageName && it.resolveInfo.serviceInfo.name == com.kabox.app.blocking.AppBlockAccessibilityService::class.java.name }
+                || (Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: "").contains(expected, ignoreCase = true)
+        } catch (_: Exception) { false }
+    }
+
+    private fun selectedBlockedApps(): Set<String> = prefs.getStringSet("blocked_apps", emptySet())?.toSet() ?: emptySet()
+
+    // ---------------------------- Insights ----------------------------
+
+    private data class UsageRow(val packageName: String, val label: String, val millis: Long, val icon: android.graphics.drawable.Drawable?)
+
+    private fun buildStats(parent: LinearLayout) {
+        parent.addView(text("YOUR DEVICE", 10f, green, true))
+        parent.addView(text("Understand your\nscreen time.", 29f, ink, true).apply { setPadding(0, dp(2), 0, dp(4)) })
+        parent.addView(text("A clearer picture of where your time goes.", 12f, muted, false))
+        gap(parent, 15)
+
+        val allowed = hasUsageAccess()
+        val total = if (allowed) todayUsageMillis() else 0L
+        val screenCard = card()
+        screenCard.addView(text("SCREEN TIME · TODAY", 9f, green, true))
+        gap(screenCard, 6)
+        screenCard.addView(text(if (allowed) formatDuration(total) else "Not connected", 33f, ink, true))
+        screenCard.addView(text(if (allowed) "Total foreground time from Android Usage Access." else "Enable Usage Access so Kabox can read app usage on this device.", 10.5f, muted, false))
+        if (!allowed) {
+            gap(screenCard, 12)
+            screenCard.addView(button("OPEN USAGE ACCESS", true) { openUsageSettings() })
+        }
+        parent.addView(screenCard)
+        gap(parent, 12)
+
+        val focusCard = card()
+        sectionTitle(focusCard, "YOUR FOCUS", "Today's progress")
+        gap(focusCard, 10)
+        focusCard.addView(statLine("Focus time", "${todayFocusMinutes()} min"))
+        gap(focusCard, 8)
+        focusCard.addView(statLine("Completed sessions", "${todaySessions()}"))
+        gap(focusCard, 8)
+        focusCard.addView(statLine("Current streak", "${currentStreak()} days"))
+        parent.addView(focusCard)
+        gap(parent, 12)
+
+        val chartCard = card()
+        sectionTitle(chartCard, "LAST 7 DAYS", "Focus activity")
+        gap(chartCard, 8)
+        chartCard.addView(WeeklyFocusChart(this, green, border, weeklyFocusValues()), LinearLayout.LayoutParams(-1, dp(120)))
+        parent.addView(chartCard)
+        gap(parent, 12)
+
+        val appCard = card()
+        sectionTitle(appCard, "MOST USED APPS", "Today")
+        gap(appCard, 8)
+        if (!allowed) {
+            appCard.addView(text("App usage will appear here after Usage Access is enabled.", 11f, muted, false))
+        } else {
+            val rows = topUsageRows()
+            if (rows.isEmpty()) appCard.addView(text("No app usage data is available yet. Try again after using your phone for a little while.", 11f, muted, false))
+            else rows.take(6).forEachIndexed { index, row ->
+                appCard.addView(usageRow(row))
+                if (index != min(5, rows.lastIndex)) gap(appCard, 10)
+            }
+        }
+        parent.addView(appCard)
+        gap(parent, 16)
+        parent.addView(text("Usage reports are provided by Android. Data is processed locally by Kabox.", 10f, muted, false).apply { gravity = Gravity.CENTER })
+    }
+
+    private fun usageRow(row: UsageRow): View {
+        val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val icon = ImageView(this).apply {
+            if (row.icon != null) setImageDrawable(row.icon)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+        line.addView(icon, LinearLayout.LayoutParams(dp(29), dp(29)))
+        val labelBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(9), 0, 0, 0) }
+        labelBox.addView(text(row.label, 11f, ink, true))
+        val maxValue = max(1L, todayUsageMillis())
+        val prog = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000
+            progress = (row.millis * 1000L / maxValue).toInt().coerceIn(8, 1000)
+            progressTintList = android.content.res.ColorStateList.valueOf(green)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(greenSoft)
+        }
+        labelBox.addView(prog, LinearLayout.LayoutParams(dp(130), dp(5)).apply { topMargin = dp(5) })
+        line.addView(labelBox, LinearLayout.LayoutParams(0, -2, 1f))
+        line.addView(text(formatDuration(row.millis), 10f, muted, true))
+        return line
+    }
+
+    private fun topUsageRows(): List<UsageRow> {
+        if (!hasUsageAccess()) return emptyList()
+        val start = startOfDayMillis()
+        val manager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val stats = manager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, start, System.currentTimeMillis()) ?: return emptyList()
+        val launchers = installedApps().associateBy { it.packageName }
+        return stats.groupBy { it.packageName }
+            .mapNotNull { (pkg, list) ->
+                if (pkg == packageName) return@mapNotNull null
+                val app = launchers[pkg]
+                val duration = list.sumOf { it.totalTimeInForeground }
+                if (duration <= 0L) return@mapNotNull null
+                val label = app?.label ?: try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString() } catch (_: Exception) { return@mapNotNull null }
+                UsageRow(pkg, label, duration, app?.icon)
+            }
+            .sortedByDescending { it.millis }
+    }
+
+    private fun hasUsageAccess(): Boolean {
+        return try {
+            val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+        } catch (_: Exception) { false }
+    }
+
+    private fun openUsageSettings() {
+        try { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+        catch (_: Exception) { Toast.makeText(this, "Settings → Apps → Special app access → Usage access → Kabox.", Toast.LENGTH_LONG).show() }
+    }
+
+    private fun todayUsageMillis(): Long {
+        if (!hasUsageAccess()) return 0L
+        return try {
+            val manager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            manager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, startOfDayMillis(), System.currentTimeMillis())
+                ?.filter { it.packageName != packageName }
+                ?.sumOf { it.totalTimeInForeground } ?: 0L
+        } catch (_: Exception) { 0L }
+    }
+
+    private fun startOfDayMillis(): Long = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
+    // ---------------------------- Profile / settings ----------------------------
+
+    private fun buildProfile(parent: LinearLayout) {
+        parent.addView(text("KABOX SETTINGS", 10f, green, true))
+        parent.addView(text("Your space.\nYour rhythm.", 29f, ink, true).apply { setPadding(0, dp(3), 0, dp(4)) })
+        parent.addView(text("Personalise how Kabox helps you focus.", 12f, muted, false))
+        gap(parent, 15)
+
+        val goalCard = card()
+        goalCard.addView(text("DAILY FOCUS GOAL", 9f, green, true))
+        gap(goalCard, 7)
+        val goalRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        goalRow.addView(text("${dailyGoalMinutes()} minutes", 22f, ink, true), LinearLayout.LayoutParams(0, -2, 1f))
+        goalRow.addView(button("CHANGE", false) { showGoalDialog() }, LinearLayout.LayoutParams(dp(94), dp(38)))
+        goalCard.addView(goalRow)
+        parent.addView(goalCard)
+        gap(parent, 12)
+
+        val schedule = card()
+        schedule.addView(text("DAILY FOCUS REMINDER", 9f, green, true))
+        gap(schedule, 7)
+        schedule.addView(text("A gentle nudge to begin your planned session.", 11f, muted, false))
+        gap(schedule, 10)
+        schedule.addView(button("SET REMINDER TIME", true) { showScheduleTimePicker() })
+        parent.addView(schedule)
+        gap(parent, 12)
+
+        val premium = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(17), dp(17), dp(17), dp(17))
+            background = gradientCard(greenDark, green, 20)
+        }
+        premium.addView(text("KABOX PLUS", 9f, Color.rgb(200, 240, 214), true))
+        gap(premium, 6)
+        premium.addView(text("More control.\nMore intentional days.", 20f, Color.WHITE, true))
+        gap(premium, 8)
+        premium.addView(text("Planned price: ₹39 / month", 13f, Color.WHITE, true))
+        gap(premium, 4)
+        premium.addView(text("Subscriptions are not active in this test APK. No payment can be taken yet.", 10f, Color.rgb(222, 243, 229), false))
+        parent.addView(premium)
+        gap(parent, 12)
+
+        val privacy = card()
+        privacy.addView(text("PRIVACY & PERMISSIONS", 9f, green, true))
+        gap(privacy, 7)
+        privacy.addView(text("Usage Access", 13f, ink, true))
+        privacy.addView(text(if (hasUsageAccess()) "Connected" else "Not enabled", 10f, muted, false))
+        gap(privacy, 9)
+        privacy.addView(button("MANAGE USAGE ACCESS", false) { openUsageSettings() })
+        gap(privacy, 8)
+        privacy.addView(text("Accessibility is only used for the app-blocking feature you choose to enable. You can disable it from Android Settings.", 10.5f, muted, false))
+        parent.addView(privacy)
+        gap(parent, 12)
+
+        val about = card()
+        about.addView(text("ABOUT KABOX", 9f, green, true))
+        gap(about, 6)
+        about.addView(text("Version 0.3.0 · Offline-first focus companion", 11f, ink, true))
+        gap(about, 3)
+        about.addView(text("Kabox is an independent product and is not affiliated with Regain or EpowerX Labs.", 10f, muted, false))
+        parent.addView(about)
+    }
+
+    private fun showGoalDialog() {
+        val options = arrayOf("30 minutes", "60 minutes", "90 minutes", "120 minutes", "180 minutes", "240 minutes")
+        val values = intArrayOf(30, 60, 90, 120, 180, 240)
+        AlertDialog.Builder(this).setTitle("Daily focus goal")
+            .setItems(options) { _, which -> prefs.edit().putInt("daily_goal_minutes", values[which]).apply(); render() }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun showScheduleTimePicker() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 430)
+        }
+        TimePickerDialog(this, { _, hour, minute ->
+            prefs.edit().putInt("reminder_hour", hour).putInt("reminder_minute", minute).putBoolean("reminder_enabled", true).apply()
+            scheduleReminder(hour, minute)
+            val label = String.format(Locale.getDefault(), "%02d:%02d", hour, minute)
+            Toast.makeText(this, "Daily reminder set for $label", Toast.LENGTH_LONG).show()
+        }, prefs.getInt("reminder_hour", 18), prefs.getInt("reminder_minute", 0), false).show()
+    }
+
+    private fun scheduleReminder(hour: Int, minute: Int) {
+        val intent = Intent(this, com.kabox.app.reminders.FocusReminderReceiver::class.java)
+        val pending = android.app.PendingIntent.getBroadcast(this, 431, intent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE)
+        val calendar = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, hour); set(Calendar.MINUTE, minute); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            if (timeInMillis <= System.currentTimeMillis()) add(Calendar.DAY_OF_YEAR, 1)
+        }
+        val alarm = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+        alarm.setInexactRepeating(android.app.AlarmManager.RTC_WAKEUP, calendar.timeInMillis, android.app.AlarmManager.INTERVAL_DAY, pending)
+    }
+
+    // ---------------------------- Records / helpers ----------------------------
+
+    private fun recordFocusSession(minutes: Int) {
+        if (minutes <= 0) return
+        val key = dateKey()
         prefs.edit()
-            .putBoolean("timer_running", false)
-            .putLong("timer_finish_at", 0L)
-            .putLong("timer_remaining", 0L)
-            .putInt("focus_minutes_$key", todayFocusMinutes() + selectedMinutes)
+            .putInt("focus_minutes_$key", todayFocusMinutes() + minutes)
             .putInt("focus_sessions_$key", todaySessions() + 1)
-            .putInt("house_points", housePoints() + 25)
+            .putInt("focus_points", prefs.getInt("focus_points", 0) + 10)
             .apply()
     }
 
-    private fun updateTimerViews() {
-        timerLabel?.text = formatClock(remainingMillis)
-        timerStatus?.text = if (timerRunning) "YOUR SESSION IS IN PROGRESS" else if (remainingMillis == 0L) "SESSION COMPLETE · WELL DONE" else "READY WHEN YOU ARE"
-        val total = selectedMinutes * 60_000L
-        val progress = if (total <= 0L) 0 else (((total - remainingMillis).toDouble() / total) * 1000).toInt().coerceIn(0, 1000)
-        timerProgress?.progress = progress
+    private fun todayFocusMinutes(): Int = prefs.getInt("focus_minutes_${dateKey()}", 0)
+    private fun todaySessions(): Int = prefs.getInt("focus_sessions_${dateKey()}", 0)
+    private fun dailyGoalMinutes(): Int = prefs.getInt("daily_goal_minutes", 120)
+    private fun dateKey(daysAgo: Int = 0): String {
+        val c = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -daysAgo) }
+        return SimpleDateFormat("yyyyMMdd", Locale.US).format(c.time)
+    }
+
+    private fun weeklyFocusValues(): List<Int> = (6 downTo 0).map { prefs.getInt("focus_minutes_${dateKey(it)}", 0) }
+
+    private fun currentStreak(): Int {
+        var offset = if (prefs.getInt("focus_minutes_${dateKey(0)}", 0) > 0) 0 else 1
+        var count = 0
+        while (offset <= 60 && prefs.getInt("focus_minutes_${dateKey(offset)}", 0) > 0) {
+            count++
+            offset++
+        }
+        return count
     }
 
     private fun formatClock(millis: Long): String {
@@ -533,42 +1096,84 @@ class MainActivity : Activity() {
         return String.format(Locale.US, "%02d:%02d", seconds / 60L, seconds % 60L)
     }
 
-    private fun todayKey(): String = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
-    private fun todayFocusMinutes(): Int = prefs.getInt("focus_minutes_${todayKey()}", 0)
-    private fun todaySessions(): Int = prefs.getInt("focus_sessions_${todayKey()}", 0)
-    private fun housePoints(): Int = prefs.getInt("house_points", 0)
-
-    private fun hasUsageAccess(): Boolean {
-        val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-        val mode = appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName)
-        return mode == AppOpsManager.MODE_ALLOWED
-    }
-
-    private fun openUsageSettings() {
-        try {
-            startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-        } catch (_: Exception) {
-            Toast.makeText(this, "Open Android Settings → Special app access → Usage access.", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun todayDeviceUsageMillis(): Long {
-        if (!hasUsageAccess()) return 0L
-        val calendar = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }
-        val manager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-        val results = manager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, calendar.timeInMillis, System.currentTimeMillis())
-        return results?.sumOf { it.totalTimeInForeground } ?: 0L
-    }
-
     private fun formatDuration(millis: Long): String {
-        val totalMinutes = millis / 60_000L
-        val hours = totalMinutes / 60L
-        val minutes = totalMinutes % 60L
-        return if (hours > 0L) "${hours}h ${minutes}m" else "${minutes}m"
+        val mins = millis / 60_000L
+        val hours = mins / 60L
+        val remaining = mins % 60L
+        return if (hours > 0) "${hours}h ${remaining}m" else "${remaining}m"
+    }
+
+    private fun text(value: String, size: Float, color: Int, bold: Boolean): TextView = TextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(color)
+        typeface = Typeface.create("sans-serif", if (bold) Typeface.BOLD else Typeface.NORMAL)
+        includeFontPadding = false
+        setLineSpacing(dp(2).toFloat(), 1f)
+    }
+
+    private fun card(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(15), dp(16), dp(15))
+        background = rounded(surface, 18, border)
+        elevation = dp(1).toFloat()
+    }
+
+    private fun sectionTitle(parent: LinearLayout, eyebrow: String, title: String) {
+        parent.addView(text(eyebrow, 8.5f, green, true))
+        gap(parent, 4)
+        parent.addView(text(title, 16f, ink, true))
+    }
+
+    private fun statLine(title: String, value: String): View {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        row.addView(text(title, 11f, muted, false), LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(text(value, 12f, ink, true))
+        return row
+    }
+
+    private fun button(label: String, primary: Boolean, custom: Int? = null, click: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 10f
+        gravity = Gravity.CENTER
+        letterSpacing = 0.04f
+        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        setTextColor(if (primary) Color.WHITE else green)
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        background = rounded(custom ?: if (primary) green else greenSoft, 13, if (primary) null else border)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { animate().scaleX(0.98f).scaleY(0.98f).setDuration(70).withEndAction {
+            animate().scaleX(1f).scaleY(1f).setDuration(80).start(); click()
+        }.start() }
+    }
+
+    private fun smallChip(label: String, selected: Boolean, click: () -> Unit): View = TextView(this).apply {
+        text = label
+        textSize = 10.5f
+        gravity = Gravity.CENTER
+        typeface = Typeface.create("sans-serif-medium", if (selected) Typeface.BOLD else Typeface.NORMAL)
+        setTextColor(if (selected) Color.WHITE else muted)
+        background = rounded(if (selected) green else Color.rgb(244, 247, 244), 11, if (selected) null else border)
+        setOnClickListener { click() }
+    }
+
+    private fun rounded(color: Int, radius: Int, stroke: Int? = null): GradientDrawable = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        setColor(color)
+        cornerRadius = dp(radius).toFloat()
+        if (stroke != null) setStroke(dp(1), stroke)
+    }
+
+    private fun gradientCard(start: Int, end: Int, radius: Int): GradientDrawable = GradientDrawable(
+        GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(start, end)
+    ).apply { cornerRadius = dp(radius).toFloat() }
+
+    private fun gap(parent: LinearLayout, height: Int) { parent.addView(View(this), LinearLayout.LayoutParams(1, dp(height))) }
+    private fun spaceW(width: Int): View = View(this).apply { layoutParams = LinearLayout.LayoutParams(dp(width), 1) }
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    private class FrameLayoutCompat(context: Context) : android.widget.FrameLayout(context) {
+        class LayoutParams(width: Int, height: Int, gravity: Int) : android.widget.FrameLayout.LayoutParams(width, height, gravity)
     }
 }

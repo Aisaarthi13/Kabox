@@ -1,1 +1,1 @@
-# No custom shrinking rules are needed for the Kabox MVP.
+# Kabox does not currently use custom ProGuard rules.
