@@ -1,82 +1,58 @@
 # Kabox — The Academy of Focus
 
-Kabox is an original wizard-academy-inspired productivity app for Android. It uses a dark, quiet, antique-gold visual language; it does not use Harry Potter characters, Hogwarts branding, or franchise artwork.
+Kabox is an offline-first Android focus companion with a dark-academia visual style.
 
-## Current build: 0.1.1 (CI workflow fix)
+## Included in v0.2.0
 
-### Working in this build
-- Focus timer with 25, 45, and 60 minute presets.
-- Start, pause, resume, and reset controls.
-- Timer state survives app process closure and can recover its remaining time after reopening.
-- Completed focus sessions, total focus minutes, daily focus minutes, and streak count are stored locally.
-- Three editable daily quest checkboxes are persisted locally.
-- Screen-time ledger reads Android UsageStats after the user manually grants Usage Access in Android Settings.
-- Dark-academia Kabox UI with five navigation sections.
+- Focus timer with 25, 50 and 90 minute presets.
+- Start, pause and reset controls.
+- Timer end-time persistence, so a running session can be restored after the app process is recreated.
+- Local focus-minute, session and House Point totals.
+- A daily focus goal and first-session quest.
+- Android Usage Access screen-time total (requires the user to enable Usage Access in Android Settings).
+- Home, Focus and Insights screens.
+- GitHub Actions workflow that builds and uploads a debug APK.
 
-### Not implemented yet
-- Blocking other apps (requires a dedicated AccessibilityService design, user disclosure/consent, and device testing).
-- Domain-based website filtering (requires a VpnService, explicit consent, and network testing).
-- Reliable Reels/Shorts channel-level blocking (not promised; encrypted traffic and app UI changes limit what can be detected).
-- Multiplayer rooms, cloud sync, leaderboards, subscriptions, and ambient audio.
-- Background timer completion notifications / exact alarms.
+## Not implemented yet
 
-These items are marked as planned in the app. The UI does not claim that these features already work.
+App blocking, website blocking, per-app usage charts, multiplayer study rooms, cloud sync, subscriptions and ambient audio are not included in this MVP. The dashboard labels planned modules as in development instead of presenting them as working features.
 
-## Build requirements
-- Android Studio compatible with Android Gradle Plugin 9.4.0.
-- JDK 17.
-- Android SDK Platform 37 and Build Tools 36.0.0.
-- Internet access for Gradle and Maven dependency downloads.
+## Build configuration
 
-The project uses Gradle 9.6.0, AGP 9.4.0, AGP built-in Kotlin 2.2.10 with its matching Compose compiler plugin, and Compose BOM 2026.09.00. AGP 9.4.0 requires JDK 17 and Gradle 9.6.0.
+- Android Gradle Plugin: 8.10.0
+- Gradle: 8.11.1
+- Kotlin: 2.2.10
+- JDK: 17
+- Compile SDK: Android 16 / API 36
+- Target SDK: 35
+- Minimum SDK: 26
 
-## Build an APK
-Run the included Gradle bootstrap launcher from the project root after installing JDK 17 and Android SDK Platform 37:
+The build workflow installs `platforms;android-36` and `build-tools;35.0.0`. It does not request the unavailable `platforms;android-37` package and does not install the removed legacy `tools` package.
 
-```bash
-./gradlew assembleDebug
-```
+## Build the APK with GitHub Actions
 
-On Windows, run `gradlew.bat assembleDebug`. The first run downloads Gradle 9.6.0 and caches it; later runs reuse that copy. The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. You can also use the GitHub Actions workflow included in this ZIP; it builds the debug APK automatically after the project is pushed.
+1. Upload this project to the `main` branch of a GitHub repository.
+2. Open **Actions**.
+3. Select **Build Kabox Android APK**.
+4. Open the latest successful run.
+5. Download the `Kabox-debug-apk` artifact.
 
-The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+The workflow uses a pinned Gradle version and verifies that the APK file exists before uploading it.
 
-## Publish all project files to GitHub
-This ZIP contains `scripts/publish-to-github.sh` and `scripts/publish-to-github.ps1`. They commit the extracted project files and create a GitHub repository named `Kabox` (or push to the existing repository) using GitHub CLI.
+## Publish this ZIP to an existing repository from Termux
 
-You need a GitHub account, Git, and GitHub CLI (`gh`) installed. Sign in once with:
+After downloading and extracting the ZIP in Termux, run:
 
 ```bash
-gh auth login
+bash scripts/publish-to-github.sh Aisaarthi13/Kabox
 ```
 
-Then run the matching script from the extracted project root. See `docs/github-upload.md` for the quickest instructions.
+The script clones the chosen repository, replaces its tracked project files with this project, commits and pushes the result. It requires `gh auth login` to have been completed first.
 
-## Privacy notes
-- Kabox v0.1 has no analytics SDK and no cloud backend.
-- Timer and quest records are saved locally in Android SharedPreferences.
-- Screen-time details are queried on-device after the user grants Usage Access. They are not uploaded by this build.
-- No Accessibility, VPN, overlay, contacts, location, or notification permission is requested in this build.
+## Permissions
 
-## Project layout
+Kabox declares `PACKAGE_USAGE_STATS`, but Android treats Usage Access as a special app access rather than an ordinary runtime permission. The user must explicitly enable it from the Insights screen. The app does not request Accessibility, VPN, overlay or device-admin permissions in this version.
 
-```text
-app/src/main/java/com/kabox/app/
-  MainActivity.kt             Compose app and screens
-  data/LocalStore.kt          Local timer, session, streak, and quest persistence
-  usage/UsageRepository.kt    Android Usage Access integration
+## Build verification note
 
-docs/                         Architecture, permissions, and release notes
-scripts/                       One-command GitHub publishing helpers
-.github/workflows/             GitHub Actions Android build workflow
-```
-
-## Important
-This is a functional first milestone, not a finished Regain-equivalent product. App blocking, website filtering, multiplayer, and production release require separate implementation and testing. Do not publish claims for a feature until it has been built and verified on real devices.
-
-
-## Updating the existing GitHub repository from Termux
-
-After downloading the updated source ZIP and extracting it, run `bash scripts/update-existing-github.sh` from the `Kabox` project folder. The script uses your existing `gh auth login` session, clones your existing `Kabox` repository, copies the project (including hidden workflow files), commits the changes, and pushes to `main`. It does not print or ask for your GitHub token.
-
-The GitHub Actions workflow uses `android-actions/setup-android@v4.0.2` and explicitly requests only `platform-tools`; it does not request the retired standalone SDK `tools` package.
+The source ZIP is checked for archive integrity, XML well-formedness, required SDK settings and workflow consistency before delivery. A real Android Gradle build must still run on GitHub Actions or Android Studio; the artifact cannot honestly be called device-tested until that build and an installation test succeed.

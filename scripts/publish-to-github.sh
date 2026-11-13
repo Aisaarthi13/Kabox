@@ -1,44 +1,39 @@
-#!/usr/bin/env bash
+#!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-REPO_NAME="Kabox"
-REPO_VISIBILITY="public" # Change to "private" before running if preferred.
+REPO="${1:-Aisaarthi13/Kabox}"
+SOURCE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+WORK_DIR="$(mktemp -d)"
+cleanup() { rm -rf "$WORK_DIR"; }
+trap cleanup EXIT
 
-if ! command -v git >/dev/null 2>&1; then
-  echo "Git is required. Install Git, then run this script again." >&2
-  exit 1
-fi
-if ! command -v gh >/dev/null 2>&1; then
-  echo "GitHub CLI (gh) is required. Install it from https://cli.github.com/" >&2
-  exit 1
-fi
-if ! gh auth status >/dev/null 2>&1; then
-  echo "Please sign in to GitHub first: gh auth login" >&2
-  exit 1
-fi
+command -v gh >/dev/null 2>&1 || { echo "GitHub CLI (gh) is missing. Run: pkg install gh git unzip"; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "Git is missing. Run: pkg install git"; exit 1; }
+gh auth status >/dev/null 2>&1 || { echo "Sign in first with: gh auth login"; exit 1; }
+gh auth setup-git >/dev/null
 
-ACCOUNT="$(gh api user --jq .login)"
-REMOTE_URL="https://github.com/${ACCOUNT}/${REPO_NAME}.git"
-
-if [ ! -d .git ]; then
-  git init
+echo "Cloning https://github.com/${REPO} ..."
+gh repo clone "$REPO" "$WORK_DIR/repo"
+BRANCH="$(git -C "$WORK_DIR/repo" branch --show-current)"
+if [ -z "$BRANCH" ]; then
+  BRANCH="main"
+  git -C "$WORK_DIR/repo" checkout -B "$BRANCH"
 fi
 
-git add -A
-if ! git diff --cached --quiet; then
-  git -c user.name="${ACCOUNT}" -c user.email="${ACCOUNT}@users.noreply.github.com" commit -m "Initial Kabox Android project"
-fi
+echo "Replacing old source files with the clean Kabox v0.2.0 project ..."
+find "$WORK_DIR/repo" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+cp -a "$SOURCE_DIR"/. "$WORK_DIR/repo"/
 
-git branch -M main
-if gh repo view "${ACCOUNT}/${REPO_NAME}" >/dev/null 2>&1; then
-  if ! git remote get-url origin >/dev/null 2>&1; then
-    git remote add origin "${REMOTE_URL}"
-  else
-    git remote set-url origin "${REMOTE_URL}"
-  fi
-  git push -u origin main
-else
-  gh repo create "${REPO_NAME}" "--${REPO_VISIBILITY}" --source=. --remote=origin --push
+LOGIN="$(gh api user --jq .login)"
+git -C "$WORK_DIR/repo" config user.name "$LOGIN"
+git -C "$WORK_DIR/repo" config user.email "${LOGIN}@users.noreply.github.com"
+git -C "$WORK_DIR/repo" add -A
+if git -C "$WORK_DIR/repo" diff --cached --quiet; then
+  echo "Repository already contains this exact source; nothing to push."
+  exit 0
 fi
-
-echo "Done. Repository: ${REMOTE_URL}"
+git -C "$WORK_DIR/repo" commit -m "Rebuild Kabox with stable Android API 36 configuration"
+git -C "$WORK_DIR/repo" push origin "HEAD:${BRANCH}"
+echo
+echo "Kabox source uploaded successfully: https://github.com/${REPO}"
+echo "Open the Actions tab to watch the Android APK build."
